@@ -1,9 +1,15 @@
+# 軽量なPythonイメージを使用
 FROM python:3.11-slim
+
+# 作業ディレクトリの設定
 WORKDIR /app
 
-# mysql-connector-python を追加！
-RUN pip install fastapi uvicorn mysql-connector-python
+# 依存関係のコピーとインストール
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
+# ソースコードをコピー
 COPY . .
-EXPOSE 8080
+
+# ポート8080で起動（Cloud Runのデフォルト）
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -1,0 +1,12 @@
+# Python 一時ファイル
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# データベース (ローカル開発用)
+*.db
+
+# OS (Mac) 一時ファイル
+.DS_Store
