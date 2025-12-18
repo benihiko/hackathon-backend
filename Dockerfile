@@ -1,19 +1,19 @@
-from fastapi import FastAPI
+# Pythonの軽量版イメージをベースにする
+FROM python:3.11-slim
 
-# FastAPIのインスタンスを作成
-app = FastAPI()
+# 作業ディレクトリを /app に設定
+WORKDIR /app
 
-# ルートURL (/) にアクセスしたときの処理
-@app.get("/")
-def read_root():
-    return {"message": "Hello World from FastAPI on Cloud Run!"}
+# FastAPIをインストール
+# requirements.txt が不要なので、直接pip installします
+RUN pip install fastapi uvicorn
 
-# /hello にアクセスしたときの処理 (おまけ)
-@app.get("/hello")
-def say_hello():
-    return {"message": "こんにちわんこそば！ (Dockerized!)"}
+# アプリケーションのコードをコンテナにコピー
+COPY . .
 
-# 以下の行はデプロイ時には不要ですが、ローカルでの実行確認用として参考になります
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="0.0.0.0", port=8000)
+# コンテナがリッスンするポート番号を指定 (Cloud Runは8080を期待します)
+EXPOSE 8080
+
+# アプリケーションを起動するコマンド
+# uvicornを使ってmain.pyのappインスタンスをホスト0.0.0.0のポート8080で起動
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
