@@ -84,6 +84,7 @@ class Item(Base):
     category_code = Column(String(100), nullable=True) 
     feature_vector = Column(Text, nullable=True)
     image_data = Column(LONGTEXT, nullable=True)
+    buyer_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     channel = relationship("Channel", back_populates="items")
     likes = relationship("Like", back_populates="item")
 
@@ -94,6 +95,9 @@ class Like(Base):
     item_id = Column(Integer, ForeignKey("items.id"))
     created_at = Column(DateTime, default=datetime.now)
     item = relationship("Item", back_populates="likes")
+
+class PurchaseRequest(BaseModel):
+    user_id: int
 
 # --- アプリ ---
 app = FastAPI()
@@ -188,6 +192,37 @@ def login(user_data: UserAuth, db: Session = Depends(get_db)):
     
     return {"id": user.id, "username": user.username, "message": "ログイン成功"}
 
+# ★追加: 購入API
+@app.post("/api/items/{item_id}/purchase")
+def purchase_item(item_id: int, req: PurchaseRequest, db: Session = Depends(get_db)):
+    item = db.query(Item).filter(Item.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="商品が見つかりません")
+    
+    if item.status == "sold":
+        raise HTTPException(status_code=400, detail="この商品は既に売り切れています")
+    
+    # ステータス更新と購入者記録
+    item.status = "sold"
+    item.buyer_id = req.user_id
+    db.commit()
+    
+    return {"message": "購入完了", "transaction_id": item.id}
+
+# ★追加: 取引ページ用情報取得API
+@app.get("/api/items/{item_id}/transaction")
+def get_transaction(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(Item).filter(Item.id == item_id).first()
+    if not item: raise HTTPException(status_code=404)
+    
+    # 出品者（チャンネルのオーナー）を取得
+    seller = db.query(User).join(Channel).filter(Channel.id == item.channel_id).first()
+    
+    return {
+        "item": item,
+        "seller_name": seller.username if seller else "不明なユーザー"
+    }
+
 
 @app.post("/api/ai/analyze_item")
 async def analyze_item(request: AnalysisRequest):
@@ -252,7 +287,7 @@ def get_user_items(user_id: int, db: Session = Depends(get_db)):
 
 @app.get("/api/items")
 def get_items(db: Session = Depends(get_db)):
-    items = db.query(Item).all()
+    items = db.query(Item).outerjoin(Channel).outerjoin(User).all()
     if rec_model is None or rec_prefs is None:
         return sorted(items, key=lambda x: x.id, reverse=True)
 
@@ -271,7 +306,31 @@ def get_items(db: Session = Depends(get_db)):
         scored_items.append({"item": item, "prob": prob})
     
     scored_items.sort(key=lambda x: x["prob"], reverse=True)
-    return [x["item"] for x in scored_items]
+    sorted_items_list = [x["item"] for x in scored_items]
+
+    result = []
+    for item in sorted_items_list:
+        seller_name = "不明"
+        seller_id = -1
+        # Item -> Channel -> User と辿って出品者情報を取得
+        if item.channel and item.channel.owner:
+            seller_name = item.channel.owner.username
+            seller_id = item.channel.owner.id
+        
+        result.append({
+            "id": item.id,
+            "title": item.title,
+            "description": item.description,
+            "price": item.price,
+            "image_data": item.image_data,
+            "status": item.status,
+            "category_code": item.category_code,
+            "seller_id": seller_id,      # ★追加: 自分の商品か判定用
+            "seller_name": seller_name   # ★追加: 表示用
+        })
+    
+    return result
+
 
 @app.get("/api/items/{item_id}/related")
 def get_related(item_id: int, db: Session = Depends(get_db)):
