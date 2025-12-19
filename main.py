@@ -191,16 +191,33 @@ def login(user_data: UserAuth, db: Session = Depends(get_db)):
 
 @app.post("/api/ai/analyze_item")
 async def analyze_item(request: AnalysisRequest):
+    # ★修正: 「無関係なキーワードの羅列」を厳しくチェックするプロンプトに変更
     prompt = f"""
-    フリマアプリ管理者としてJSONで回答。
-    {{ "suggested_channel": "推奨チャンネル", "is_valid": true/false, "reason": "理由" }}
-    商品: {request.item_name}, 説明: {request.item_description}
+    You are a strict moderator for a flea market app. Analyze the item details below.
+    
+    Check STRICTLY for the following violations:
+    1. **Keyword Stuffing**: Listing unrelated celebrity names, brands, or words just for search hits (e.g., putting "BTS" or "Nike" on a completely unrelated item).
+    2. **Mismatches**: The description contradicts the item name.
+    3. **Prohibited Items**: Illegal or dangerous goods.
+
+    If the description contains proper nouns (like "佐藤健", "TXT", "Apple") that are clearly unrelated to the Item Name, YOU MUST set "is_valid" to false.
+
+    Output JSON keys must be exactly:
+    - "suggested_channel": (String) Recommended category in Japanese
+    - "is_valid": (Boolean) true if Safe, false if Violation found
+    - "reason": (String) Reason for the judgment in Japanese. If rejected, explicitly state which keywords were unrelated.
+
+    Item Name: {request.item_name}
+    Description: {request.item_description}
     """
     try:
         response = ai_model.generate_content(prompt)
-        return json.loads(response.text)
-    except:
-        return {"suggested_channel": "不明", "is_valid": False, "reason": "AIエラー"}
+        # マークダウン記法の除去
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean_text)
+    except Exception as e:
+        print(f"AI Error: {e}")
+        return {"suggested_channel": "不明", "is_valid": False, "reason": "AIエラーが発生しました"}
 
 @app.post("/api/items")
 def create_item(item: ItemCreate, db: Session = Depends(get_db)):
