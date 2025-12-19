@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 import joblib
 import pandas as pd
 from passlib.context import CryptContext # ★追加
+from typing import List, Optional # ★追加
 
 load_dotenv()
 
@@ -98,6 +99,23 @@ class Like(Base):
 
 class PurchaseRequest(BaseModel):
     user_id: int
+
+class AnalysisRequest(BaseModel):
+    item_name: str
+    item_description: str
+    existing_channels: List[str] = [] # ユーザーが持っているチャンネル名のリスト
+
+class ChannelCreate(BaseModel):
+    name: str
+    user_id: int
+
+class ItemCreate(BaseModel):
+    title: str
+    description: str
+    price: int
+    image_data: str = ""
+    user_id: int
+    channel_id: int # ★修正: ユーザーが選択したチャンネルIDを必須にする
 
 # --- アプリ ---
 app = FastAPI()
@@ -223,27 +241,41 @@ def get_transaction(item_id: int, db: Session = Depends(get_db)):
         "seller_name": seller.username if seller else "不明なユーザー"
     }
 
+# ★追加: ユーザーのチャンネル一覧取得
+@app.get("/api/users/{user_id}/channels")
+def get_user_channels(user_id: int, db: Session = Depends(get_db)):
+    return db.query(Channel).filter(Channel.user_id == user_id).all()
+
+# ★追加: 新規チャンネル作成
+@app.post("/api/channels")
+def create_channel(req: ChannelCreate, db: Session = Depends(get_db)):
+    new_ch = Channel(user_id=req.user_id, name=req.name)
+    db.add(new_ch)
+    db.commit()
+    db.refresh(new_ch)
+    return new_ch
+
 
 @app.post("/api/ai/analyze_item")
 async def analyze_item(request: AnalysisRequest):
+    channels_str = ", ".join(request.existing_channels) if request.existing_channels else "なし"
     # ★修正: 「無関係なキーワードの羅列」を厳しくチェックするプロンプトに変更
     prompt = f"""
-    You are a strict moderator for a flea market app. Analyze the item details below.
+    You are a strict moderator for a flea market app.
     
-    Check STRICTLY for the following violations:
-    1. **Keyword Stuffing**: Listing unrelated celebrity names, brands, or words just for search hits (e.g., putting "BTS" or "Nike" on a completely unrelated item).
-    2. **Mismatches**: The description contradicts the item name.
-    3. **Prohibited Items**: Illegal or dangerous goods.
-
-    If the description contains proper nouns (like "佐藤健", "TXT", "Apple") that are clearly unrelated to the Item Name, YOU MUST set "is_valid" to false.
-
-    Output JSON keys must be exactly:
-    - "suggested_channel": (String) Recommended category in Japanese
-    - "is_valid": (Boolean) true if Safe, false if Violation found
-    - "reason": (String) Reason for the judgment in Japanese. If rejected, explicitly state which keywords were unrelated.
+    Task 1: Check for violations (Keyword Stuffing, Mismatches, Prohibited Items).
+    Task 2: Select the best fit channel from the user's EXISTING CHANNELS list.
+    
+    User's Existing Channels: [{channels_str}]
 
     Item Name: {request.item_name}
     Description: {request.item_description}
+
+    Output JSON keys must be exactly:
+    - "is_valid": (Boolean) true if Safe, false if Violation
+    - "reason": (String) Reason for judgment (Japanese).
+    - "suggested_channel": (String) The EXACT name of the best matching channel from the list above. If none fit or list is empty, return "null" (string).
+    - "new_channel_suggestion": (String) A recommended name for a NEW channel (e.g. "スニーカー", "家電") if existing ones don't fit.
     """
     try:
         response = ai_model.generate_content(prompt)
@@ -252,28 +284,24 @@ async def analyze_item(request: AnalysisRequest):
         return json.loads(clean_text)
     except Exception as e:
         print(f"AI Error: {e}")
-        return {"suggested_channel": "不明", "is_valid": False, "reason": "AIエラーが発生しました"}
+        return {"suggested_channel": "不明", "is_valid": False, "reason": "AIエラーが発生しました", "new_channel_suggestion": "その他"}
 
 @app.post("/api/items")
 def create_item(item: ItemCreate, db: Session = Depends(get_db)):
-    # リクエストで送られてきた user_id を使う
-    user = db.query(User).filter(User.id == item.user_id).first()
-    if not user:
-        # 万が一ユーザーがいなければデモ用ユーザーにフォールバック
-        user = db.query(User).first()
-    
-    channel = db.query(Channel).filter(Channel.user_id == user.id).first()
-    # チャンネルがなければ作る
+    # 指定されたチャンネルが存在するか確認
+    channel = db.query(Channel).filter(Channel.id == item.channel_id).first()
     if not channel:
-        channel = Channel(user_id=user.id, name=f"{user.username}のチャンネル")
-        db.add(channel)
-        db.commit()
-    
+        raise HTTPException(status_code=400, detail="無効なチャンネルIDです")
+
     cat_code = predict_category_code(item.title)
     
     new_item = Item(
-        channel_id=channel.id, title=item.title, description=item.description,
-        price=item.price, image_data=item.image_data, category_code=cat_code
+        channel_id=item.channel_id, # ★ここが変わりました
+        title=item.title, 
+        description=item.description,
+        price=item.price, 
+        image_data=item.image_data, 
+        category_code=cat_code
     )
     db.add(new_item)
     db.commit()
