@@ -106,18 +106,26 @@ def get_db():
 
 @app.on_event("startup")
 def startup_event():
-    Base.metadata.create_all(bind=engine)
-    # 既存ユーザーがいなければ作る処理は register API に任せるため削除・簡略化可能ですが、
-    # 念のためデモ用ユーザーも残しておきます（パスワードなし）
-    db = SessionLocal()
-    if db.query(User).filter(User.username == "べにひこ").count() == 0:
-        me = User(username="べにひこ") # デモ用なのでパスワードなし
-        db.add(me)
-        db.commit()
-        ch1 = Channel(user_id=me.id, name="メインチャンネル")
-        db.add(ch1)
-        db.commit()
-    db.close()
+    try:
+        # DB接続を試みる
+        print("DB接続を開始します...")
+        Base.metadata.create_all(bind=engine)
+        print("DB接続成功")
+
+        # デモユーザー作成など（もしあれば）
+        db = SessionLocal()
+        if db.query(User).filter(User.username == "べにひこ").count() == 0:
+            me = User(username="べにひこ")
+            db.add(me)
+            db.commit()
+            ch1 = Channel(user_id=me.id, name="メインチャンネル")
+            db.add(ch1)
+            db.commit()
+        db.close()
+    except Exception as e:
+        # 重要：ここでエラーを握りつぶして、アプリの起動を止めないようにする
+        print(f"★警告: DB接続に失敗しました。アプリは起動しますがDB機能は使えません。エラー内容: {e}")
+        pass
 
 # --- ロジック ---
 def predict_category_code(item_name: str):
