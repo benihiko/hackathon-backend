@@ -3,6 +3,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy.dialects.mysql import LONGTEXT 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 import os
@@ -13,38 +14,46 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 import joblib
 import pandas as pd
+from passlib.context import CryptContext # ★追加
 
 load_dotenv()
+
+# --- パスワードハッシュ化設定 ---
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # --- Gemini設定 ---
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 generation_config = {"temperature": 0.2, "response_mime_type": "application/json"}
 ai_model = genai.GenerativeModel('gemini-2.0-flash', generation_config=generation_config)
-# カテゴリ推論用はJSONモードを使わない
 text_model = genai.GenerativeModel('gemini-2.0-flash')
 
-# --- レコメンドモデルの読み込み ---
+# --- モデル読み込み ---
 try:
     print("学習済みモデルを読み込んでいます...")
     rec_data = joblib.load('recommender.pkl')
-    rec_model = rec_data['model'] # LogisticRegression
-    rec_prefs = rec_data['prefs'] # ユーザーの好みデータ (DataFrame)
+    rec_model = rec_data['model'] 
+    rec_prefs = rec_data['prefs'] 
     print("モデル読み込み完了 ✅")
 except Exception as e:
-    print(f"モデル読み込み失敗 (レコメンド機能は制限されます): {e}")
+    print(f"モデル読み込み失敗: {e}")
     rec_model = None
     rec_prefs = None
 
-# マスタカテゴリの読み込み
 try:
     with open("category_list.txt", "r", encoding="utf-8") as f:
         CATEGORY_MASTER = [line.strip() for line in f.readlines() if line.strip()]
 except:
     CATEGORY_MASTER = []
 
-# --- DB設定 ---
-SQLALCHEMY_DATABASE_URL = "sqlite:///./local_dev.db"
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+# --- Cloud SQL接続設定 ---
+DB_USER = "benihiko"
+DB_PASS = "Hide-1213"
+DB_HOST = "136.119.203.142"
+DB_NAME = "hackathon"
+
+DATABASE_URL = f"mysql+mysqlconnector://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
+
+engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -53,6 +62,7 @@ class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), unique=True)
+    hashed_password = Column(String(100)) # ★追加: パスワード保存用
     channels = relationship("Channel", back_populates="owner")
 
 class Channel(Base):
@@ -71,10 +81,9 @@ class Item(Base):
     description = Column(Text)
     price = Column(Integer)
     status = Column(String(20), default="on_sale")
-    # ★重要: データ分析チーム指定のカラム
     category_code = Column(String(100), nullable=True) 
     feature_vector = Column(Text, nullable=True)
-    image_data = Column(Text, nullable=True)
+    image_data = Column(LONGTEXT, nullable=True)
     channel = relationship("Channel", back_populates="items")
     likes = relationship("Like", back_populates="item")
 
@@ -88,13 +97,7 @@ class Like(Base):
 
 # --- アプリ ---
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 def get_db():
     db = SessionLocal()
@@ -104,43 +107,29 @@ def get_db():
 @app.on_event("startup")
 def startup_event():
     Base.metadata.create_all(bind=engine)
+    # 既存ユーザーがいなければ作る処理は register API に任せるため削除・簡略化可能ですが、
+    # 念のためデモ用ユーザーも残しておきます（パスワードなし）
     db = SessionLocal()
-    if db.query(User).count() == 0:
-        me = User(username="べにひこ")
+    if db.query(User).filter(User.username == "べにひこ").count() == 0:
+        me = User(username="べにひこ") # デモ用なのでパスワードなし
         db.add(me)
         db.commit()
-        db.refresh(me)
         ch1 = Channel(user_id=me.id, name="メインチャンネル")
         db.add(ch1)
         db.commit()
     db.close()
 
-# --- ヘルパー関数: カテゴリ推論 ---
+# --- ロジック ---
 def predict_category_code(item_name: str):
     if not CATEGORY_MASTER: return "unknown"
-    
-    # AIへの指示
-    prompt = f"""
-    リストの中から、この商品に最も近いカテゴリを1つ選び、その文字列だけを返してください。
-    リスト外の言葉は厳禁です。
-
-    [商品名]
-    {item_name}
-
-    [リスト]
-    {", ".join(CATEGORY_MASTER[:100])} ... (以下省略)
-    """
+    prompt = f"リストの中から、この商品に最も近いカテゴリを1つ選び、その文字列だけを返してください。\n商品: {item_name}\nリスト: {', '.join(CATEGORY_MASTER[:50])}..."
     try:
         response = text_model.generate_content(prompt)
         prediction = response.text.strip()
-        # マスタに存在するかチェック (完全一致検索)
-        # ※簡易化のため、AIの回答がマスタに含まれていれば採用
         for cat in CATEGORY_MASTER:
-            if cat in prediction:
-                return cat
+            if cat in prediction: return cat
         return "unknown"
-    except:
-        return "unknown"
+    except: return "unknown"
 
 # --- API ---
 class AnalysisRequest(BaseModel):
@@ -152,10 +141,44 @@ class ItemCreate(BaseModel):
     description: str
     price: int
     image_data: str = ""
+    user_id: int
+
+# ★追加: ユーザー認証用モデル
+class UserAuth(BaseModel):
+    username: str
+    password: str
+
+# ★追加: 新規登録API
+@app.post("/api/register")
+def register(user_data: UserAuth, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.username == user_data.username).first():
+        raise HTTPException(status_code=400, detail="このユーザー名は既に使用されています")
+    
+    hashed_pw = pwd_context.hash(user_data.password)
+    new_user = User(username=user_data.username, hashed_password=hashed_pw)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    # チャンネルも自動作成
+    default_ch = Channel(user_id=new_user.id, name="メインチャンネル")
+    db.add(default_ch)
+    db.commit()
+    
+    return {"id": new_user.id, "username": new_user.username, "message": "登録完了"}
+
+# ★追加: ログインAPI
+@app.post("/api/login")
+def login(user_data: UserAuth, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == user_data.username).first()
+    if not user or not user.hashed_password or not pwd_context.verify(user_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="ユーザー名かパスワードが間違っています")
+    
+    return {"id": user.id, "username": user.username, "message": "ログイン成功"}
+
 
 @app.post("/api/ai/analyze_item")
 async def analyze_item(request: AnalysisRequest):
-    # 既存の診断ロジック
     prompt = f"""
     フリマアプリ管理者としてJSONで回答。
     {{ "suggested_channel": "推奨チャンネル", "is_valid": true/false, "reason": "理由" }}
@@ -169,74 +192,60 @@ async def analyze_item(request: AnalysisRequest):
 
 @app.post("/api/items")
 def create_item(item: ItemCreate, db: Session = Depends(get_db)):
-    user = db.query(User).first()
-    channel = db.query(Channel).filter(Channel.user_id == user.id).first()
+    # リクエストで送られてきた user_id を使う
+    user = db.query(User).filter(User.id == item.user_id).first()
+    if not user:
+        # 万が一ユーザーがいなければデモ用ユーザーにフォールバック
+        user = db.query(User).first()
     
-    # 1. 自動カテゴリ推論 (The Bridge)
+    channel = db.query(Channel).filter(Channel.user_id == user.id).first()
+    # チャンネルがなければ作る
+    if not channel:
+        channel = Channel(user_id=user.id, name=f"{user.username}のチャンネル")
+        db.add(channel)
+        db.commit()
+    
     cat_code = predict_category_code(item.title)
-    print(f"自動付与カテゴリ: {cat_code}")
-
+    
     new_item = Item(
         channel_id=channel.id, title=item.title, description=item.description,
-        price=item.price, image_data=item.image_data, 
-        category_code=cat_code # ★AIが決めたカテゴリを保存
+        price=item.price, image_data=item.image_data, category_code=cat_code
     )
     db.add(new_item)
     db.commit()
     return {"message": "登録完了", "id": new_item.id}
 
+@app.get("/api/users/{user_id}/items")
+def get_user_items(user_id: int, db: Session = Depends(get_db)):
+    # Channel経由でItemを取得
+    items = db.query(Item).join(Channel).filter(Channel.user_id == user_id).order_by(Item.id.desc()).all()
+    return items
+
 @app.get("/api/items")
 def get_items(db: Session = Depends(get_db)):
     items = db.query(Item).all()
-    
-    # モデルが読み込めていない場合はID順で返す
     if rec_model is None or rec_prefs is None:
         return sorted(items, key=lambda x: x.id, reverse=True)
 
-    # --- 本格レコメンドロジック ---
-    # デモのため、特定ユーザー（電子機器好きのユーザーID）になりきってスコア計算する
-    # 実際はログイン中の user.id を使う
-    DEMO_USER_ID = 555696053 # electronics.clocks などを好むユーザー
-    
+    DEMO_USER_ID = 555696053 
     scored_items = []
     
     for item in items:
-        # 1. このユーザーの、このカテゴリに対するスコアを取得
         user_cat_score = 0
-        cat = item.category_code
+        if item.category_code:
+            match = rec_prefs[(rec_prefs['user_id'] == DEMO_USER_ID) & (rec_prefs['category_code'] == item.category_code)]
+            if not match.empty: user_cat_score = match.iloc[0]['score']
         
-        if cat:
-            # prefs (DataFrame) から検索
-            match = rec_prefs[(rec_prefs['user_id'] == DEMO_USER_ID) & (rec_prefs['category_code'] == cat)]
-            if not match.empty:
-                user_cat_score = match.iloc[0]['score']
-        
-        # 2. モデルで「購入確率」を予測
-        # モデルへの入力は [[score]] という形のDataFrame
         try:
-            input_df = pd.DataFrame([[user_cat_score]], columns=['score'])
-            prob = rec_model.predict_proba(input_df)[0][1] # クラス1(購入)の確率
-        except:
-            prob = 0
-            
-        # 3. 確率をアイテムに紐付けてリスト化
+            prob = rec_model.predict_proba(pd.DataFrame([[user_cat_score]], columns=['score']))[0][1]
+        except: prob = 0
         scored_items.append({"item": item, "prob": prob})
     
-    # 4. 確率が高い順にソート
     scored_items.sort(key=lambda x: x["prob"], reverse=True)
-    
-    # アイテムオブジェクトだけを取り出して返す
     return [x["item"] for x in scored_items]
 
 @app.get("/api/items/{item_id}/related")
 def get_related(item_id: int, db: Session = Depends(get_db)):
-    # 簡易レコメンド（同じカテゴリのものを返す）
     target = db.query(Item).filter(Item.id == item_id).first()
     if not target: return []
-    
-    related = db.query(Item).filter(
-        Item.category_code == target.category_code, 
-        Item.id != item_id
-    ).limit(3).all()
-    
-    return related
+    return db.query(Item).filter(Item.category_code == target.category_code, Item.id != item_id).limit(3).all()
