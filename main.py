@@ -17,6 +17,72 @@ import pandas as pd
 from passlib.context import CryptContext # ★追加
 from typing import List, Optional # ★追加
 
+# --- カテゴリ定義 (内部コード: 日本語表示名) ---
+CATEGORY_TRANSLATION = {
+    # --- 既存互換（レコメンドが効くエリア） ---
+    "accessories.bag": "バッグ",
+    "accessories.wallet": "財布・小物",
+    "apparel.costume": "コスプレ・衣装",
+    "apparel.dress": "ドレス・ワンピース",
+    "apparel.jacket": "ジャケット・アウター",
+    "apparel.jeans": "デニム・ジーンズ",
+    "apparel.shirt": "シャツ・ブラウス",
+    "apparel.shoes": "靴・シューズ",
+    "apparel.shoes.sneakers": "スニーカー", # 既存リストに合わせて調整
+    "apparel.tshirt": "Tシャツ・カットソー",
+    "appliances.environment.air_conditioner": "エアコン",
+    "appliances.kitchen.coffee_machine": "コーヒーメーカー",
+    "appliances.kitchen.microwave": "電子レンジ",
+    "appliances.kitchen.refrigerators": "冷蔵庫",
+    "appliances.personal.hair_dryer": "ドライヤー",
+    "appliances.personal.massager": "美容・健康家電", # 簡潔に
+    "computers.notebook": "ノートPC",
+    "computers.peripherals.monitor": "モニター",
+    "electronics.audio.headphone": "ヘッドフォン",
+    "electronics.camera.photo": "カメラ",
+    "electronics.smartphone": "スマートフォン",
+    "electronics.tablet": "タブレット",
+    "electronics.video.tv": "テレビ",
+    "furniture.living_room.sofa": "ソファ",
+    "furniture.living_room.table": "テーブル",
+    "kids.toys": "おもちゃ",
+    "sport.bicycle": "自転車",
+    
+    # --- ★新規拡充エリア（ここから下を追加） ---
+    
+    # エンタメ・ホビー
+    "hobby.idol_goods": "アイドルグッズ",
+    "hobby.anime_goods": "アニメ・コミックグッズ",
+    "hobby.trading_cards": "トレーディングカード",
+    "hobby.figures": "フィギュア",
+    "hobby.musical_instruments": "楽器・機材",
+    "hobby.art": "美術品・アート",
+    
+    # 書籍・メディア
+    "books.comic": "漫画・コミック",
+    "books.novel": "小説・文学",
+    "books.business": "ビジネス・経済",
+    "books.study_guide": "参考書・学習本",
+    "books.magazine": "雑誌",
+    "media.cd": "CD",
+    "media.dvd_bluray": "DVD/Blu-ray",
+    "media.game_software": "ゲームソフト",
+    "media.game_console": "ゲーム機本体",
+
+    # メンズ・レディース詳細
+    "fashion.mens.tops": "メンズトップス",
+    "fashion.mens.bottoms": "メンズパンツ",
+    "fashion.ladies.tops": "レディーストップス",
+    "fashion.ladies.skirt": "スカート",
+    
+    # その他
+    "tickets": "チケット",
+    "food": "食品・お菓子",
+    "handmade": "ハンドメイド",
+    "other": "その他"
+}
+
+
 load_dotenv()
 
 # --- パスワードハッシュ化設定 ---
@@ -156,14 +222,45 @@ def startup_event():
 # --- ロジック ---
 def predict_category_code(item_name: str):
     if not CATEGORY_MASTER: return "unknown"
-    prompt = f"リストの中から、この商品に最も近いカテゴリを1つ選び、その文字列だけを返してください。\n商品: {item_name}\nリスト: {', '.join(CATEGORY_MASTER[:50])}..."
+    
+    # ★修正: [:50]を削除して全件渡す & プロンプトを明確化
+def predict_category_code(item_name: str):
+    # ファイル読み込みをやめて、辞書のキーを使う
+    categories = list(CATEGORY_TRANSLATION.keys())
+    
+    # AIへの選択肢として英語コードを渡す
+    categories_str = ", ".join(categories)
+    
+    prompt = f"""
+    You are an AI assistant that classifies products for a Japanese flea market app.
+    Select the MOST appropriate category code from the list below based on the Item Name.
+    
+    Item Name: {item_name}
+    
+    Output Requirement:
+    - Return ONLY the category code string from the list.
+    - Example: "hobby.idol_goods"
+    
+    Category List:
+    {categories_str}
+    """
+    
     try:
         response = text_model.generate_content(prompt)
         prediction = response.text.strip()
-        for cat in CATEGORY_MASTER:
-            if cat in prediction: return cat
-        return "unknown"
-    except: return "unknown"
+        
+        # 予測されたコードが辞書にあるか確認
+        if prediction in CATEGORY_TRANSLATION:
+            return prediction
+        
+        # 部分一致で救済（AIが少し余計な文字をつけても拾えるように）
+        for key in CATEGORY_TRANSLATION:
+            if key in prediction: return key
+            
+        return "other" # 見つからない場合はその他
+    except Exception as e:
+        print(f"Category Prediction Error: {e}")
+        return "other"
 
 # --- API ---
 
@@ -223,11 +320,22 @@ def get_transaction(item_id: int, db: Session = Depends(get_db)):
     item = db.query(Item).filter(Item.id == item_id).first()
     if not item: raise HTTPException(status_code=404)
     
-    # 出品者（チャンネルのオーナー）を取得
     seller = db.query(User).join(Channel).filter(Channel.id == item.channel_id).first()
     
+    # ★追加: itemオブジェクトを辞書に変換し、日本語カテゴリを入れる
+    jp_category_name = CATEGORY_TRANSLATION.get(item.category_code, item.category_code)
+    
+    item_dict = {
+        "id": item.id,
+        "title": item.title,
+        "price": item.price,
+        "image_data": item.image_data,
+        "description": item.description,
+        "category_name": jp_category_name # ★ここが重要！
+    }
+    
     return {
-        "item": item,
+        "item": item_dict, # 生のitemではなく、辞書を返す
         "seller_name": seller.username if seller else "不明なユーザー"
     }
 
@@ -301,7 +409,24 @@ def create_item(item: ItemCreate, db: Session = Depends(get_db)):
 def get_user_items(user_id: int, db: Session = Depends(get_db)):
     # Channel経由でItemを取得
     items = db.query(Item).join(Channel).filter(Channel.user_id == user_id).order_by(Item.id.desc()).all()
-    return items
+    
+    # ★追加: 日本語カテゴリ名などを付与して辞書リストにする
+    result = []
+    for item in items:
+        # 辞書から日本語名を取得
+        jp_category_name = CATEGORY_TRANSLATION.get(item.category_code, item.category_code)
+        
+        result.append({
+            "id": item.id,
+            "title": item.title,
+            "description": item.description,
+            "price": item.price,
+            "image_data": item.image_data,
+            "status": item.status,
+            "category_code": item.category_code,
+            "category_name": jp_category_name, # ★ここが重要！
+        })
+    return result
 
 @app.get("/api/items")
 def get_items(db: Session = Depends(get_db)):
@@ -334,7 +459,7 @@ def get_items(db: Session = Depends(get_db)):
         if item.channel and item.channel.owner:
             seller_name = item.channel.owner.username
             seller_id = item.channel.owner.id
-        
+        jp_category_name = CATEGORY_TRANSLATION.get(item.category_code, item.category_code)
         result.append({
             "id": item.id,
             "title": item.title,
@@ -343,6 +468,7 @@ def get_items(db: Session = Depends(get_db)):
             "image_data": item.image_data,
             "status": item.status,
             "category_code": item.category_code,
+            "category_name": jp_category_name,   # ★追加: 画面表示用の日本語！
             "seller_id": seller_id,      # ★追加: 自分の商品か判定用
             "seller_name": seller_name   # ★追加: 表示用
         })
