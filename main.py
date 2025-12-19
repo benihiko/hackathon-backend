@@ -166,16 +166,6 @@ def predict_category_code(item_name: str):
     except: return "unknown"
 
 # --- API ---
-class AnalysisRequest(BaseModel):
-    item_name: str
-    item_description: str
-
-class ItemCreate(BaseModel):
-    title: str
-    description: str
-    price: int
-    image_data: str = ""
-    user_id: int
 
 # ★追加: ユーザー認証用モデル
 class UserAuth(BaseModel):
