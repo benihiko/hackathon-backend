@@ -429,37 +429,49 @@ def get_user_items(user_id: int, db: Session = Depends(get_db)):
     return result
 
 @app.get("/api/items")
-def get_items(db: Session = Depends(get_db)):
+def get_items(sort: str = "recommend", db: Session = Depends(get_db)):
+    # チャンネルとユーザー情報を結合して取得
     items = db.query(Item).outerjoin(Channel).outerjoin(User).all()
-    if rec_model is None or rec_prefs is None:
-        return sorted(items, key=lambda x: x.id, reverse=True)
-
-    DEMO_USER_ID = 555696053 
-    scored_items = []
     
-    for item in items:
-        user_cat_score = 0
-        if item.category_code:
-            match = rec_prefs[(rec_prefs['user_id'] == DEMO_USER_ID) & (rec_prefs['category_code'] == item.category_code)]
-            if not match.empty: user_cat_score = match.iloc[0]['score']
-        
-        try:
-            prob = rec_model.predict_proba(pd.DataFrame([[user_cat_score]], columns=['score']))[0][1]
-        except: prob = 0
-        scored_items.append({"item": item, "prob": prob})
-    
-    scored_items.sort(key=lambda x: x["prob"], reverse=True)
-    sorted_items_list = [x["item"] for x in scored_items]
+    sorted_items_list = []
 
+    # --- パターンA: 新着順 (IDの降順) ---
+    if sort == "new":
+        sorted_items_list = sorted(items, key=lambda x: x.id, reverse=True)
+    
+    # --- パターンB: おすすめ順 (機械学習) ---
+    else:
+        if rec_model is None or rec_prefs is None:
+            # モデルがなければ新着順にフォールバック
+            sorted_items_list = sorted(items, key=lambda x: x.id, reverse=True)
+        else:
+            DEMO_USER_ID = 555696053 
+            scored_items = []
+            for item in items:
+                user_cat_score = 0
+                if item.category_code:
+                    match = rec_prefs[(rec_prefs['user_id'] == DEMO_USER_ID) & (rec_prefs['category_code'] == item.category_code)]
+                    if not match.empty: user_cat_score = match.iloc[0]['score']
+                
+                try:
+                    prob = rec_model.predict_proba(pd.DataFrame([[user_cat_score]], columns=['score']))[0][1]
+                except: prob = 0
+                scored_items.append({"item": item, "prob": prob})
+            
+            scored_items.sort(key=lambda x: x["prob"], reverse=True)
+            sorted_items_list = [x["item"] for x in scored_items]
+
+    # --- 結果の整形 (共通処理) ---
     result = []
     for item in sorted_items_list:
         seller_name = "不明"
         seller_id = -1
-        # Item -> Channel -> User と辿って出品者情報を取得
         if item.channel and item.channel.owner:
             seller_name = item.channel.owner.username
             seller_id = item.channel.owner.id
+        
         jp_category_name = CATEGORY_TRANSLATION.get(item.category_code, item.category_code)
+        
         result.append({
             "id": item.id,
             "title": item.title,
@@ -468,9 +480,9 @@ def get_items(db: Session = Depends(get_db)):
             "image_data": item.image_data,
             "status": item.status,
             "category_code": item.category_code,
-            "category_name": jp_category_name,   # ★追加: 画面表示用の日本語！
-            "seller_id": seller_id,      # ★追加: 自分の商品か判定用
-            "seller_name": seller_name   # ★追加: 表示用
+            "category_name": jp_category_name,
+            "seller_id": seller_id,
+            "seller_name": seller_name
         })
     
     return result
