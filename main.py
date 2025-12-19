@@ -99,7 +99,7 @@ class Like(Base):
 app = FastAPI()
 origins = [
     "http://localhost:3000",
-    "https://hackathon-frontend-h3av.vercel.app/", # ←ここをあなたの実際のVercel URLに変えてください！
+    "https://hackathon-frontend-h3av.vercel.app", # ←ここをあなたの実際のVercel URLに変えてください！
 ]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
