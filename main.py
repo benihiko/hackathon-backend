@@ -314,6 +314,52 @@ def purchase_item(item_id: int, req: PurchaseRequest, db: Session = Depends(get_
     
     return {"message": "購入完了", "transaction_id": item.id}
 
+# ★追加: いいね切替API
+@app.post("/api/items/{item_id}/like")
+def toggle_like(item_id: int, req: PurchaseRequest, db: Session = Depends(get_db)):
+    # 既にいいねしているか確認
+    existing = db.query(Like).filter(Like.user_id == req.user_id, Like.item_id == item_id).first()
+    
+    if existing:
+        # あれば削除 (いいね解除)
+        db.delete(existing)
+        db.commit()
+        return {"liked": False}
+    else:
+        # なければ作成 (いいね登録)
+        new_like = Like(user_id=req.user_id, item_id=item_id)
+        db.add(new_like)
+        db.commit()
+        return {"liked": True}
+
+# ★追加: いいね一覧取得API
+@app.get("/api/users/{user_id}/likes")
+def get_user_likes(user_id: int, db: Session = Depends(get_db)):
+    # Likeテーブル経由でItemを取得
+    items = db.query(Item).join(Like).filter(Like.user_id == user_id).order_by(Like.created_at.desc()).all()
+    
+    # 辞書型に変換（共通処理）
+    result = []
+    for item in items:
+        seller_name = "不明"
+        if item.channel and item.channel.owner:
+            seller_name = item.channel.owner.username
+        
+        jp_category_name = CATEGORY_TRANSLATION.get(item.category_code, item.category_code)
+        
+        result.append({
+            "id": item.id,
+            "title": item.title,
+            "description": item.description,
+            "price": item.price,
+            "image_data": item.image_data,
+            "status": item.status,
+            "category_code": item.category_code,
+            "category_name": jp_category_name,
+            "seller_name": seller_name
+        })
+    return result
+
 # ★追加: 取引ページ用情報取得API
 @app.get("/api/items/{item_id}/transaction")
 def get_transaction(item_id: int, db: Session = Depends(get_db)):
@@ -428,24 +474,28 @@ def get_user_items(user_id: int, db: Session = Depends(get_db)):
         })
     return result
 
+# ★修正: get_items (おすすめ計算にいいねを考慮)
+# user_id 引数を追加 (Optional)
 @app.get("/api/items")
-def get_items(sort: str = "recommend", db: Session = Depends(get_db)):
-    # チャンネルとユーザー情報を結合して取得
+def get_items(sort: str = "recommend", user_id: Optional[int] = None, db: Session = Depends(get_db)):
     items = db.query(Item).outerjoin(Channel).outerjoin(User).all()
-    
     sorted_items_list = []
 
-    # --- パターンA: 新着順 (IDの降順) ---
     if sort == "new":
         sorted_items_list = sorted(items, key=lambda x: x.id, reverse=True)
-    
-    # --- パターンB: おすすめ順 (機械学習) ---
     else:
+        # レコメンドロジック
         if rec_model is None or rec_prefs is None:
-            # モデルがなければ新着順にフォールバック
             sorted_items_list = sorted(items, key=lambda x: x.id, reverse=True)
         else:
             DEMO_USER_ID = 555696053 
+            
+            # ★追加: ユーザーがいいねしているカテゴリを取得して「ブースト」する
+            liked_categories = []
+            if user_id:
+                liked_items = db.query(Item).join(Like).filter(Like.user_id == user_id).all()
+                liked_categories = [i.category_code for i in liked_items if i.category_code]
+
             scored_items = []
             for item in items:
                 user_cat_score = 0
@@ -453,6 +503,10 @@ def get_items(sort: str = "recommend", db: Session = Depends(get_db)):
                     match = rec_prefs[(rec_prefs['user_id'] == DEMO_USER_ID) & (rec_prefs['category_code'] == item.category_code)]
                     if not match.empty: user_cat_score = match.iloc[0]['score']
                 
+                # ★追加: もしこの商品のカテゴリをいいねしていたら、スコアに +5.0点 (かなり強力)
+                if item.category_code in liked_categories:
+                    user_cat_score += 5.0
+
                 try:
                     prob = rec_model.predict_proba(pd.DataFrame([[user_cat_score]], columns=['score']))[0][1]
                 except: prob = 0
@@ -461,7 +515,7 @@ def get_items(sort: str = "recommend", db: Session = Depends(get_db)):
             scored_items.sort(key=lambda x: x["prob"], reverse=True)
             sorted_items_list = [x["item"] for x in scored_items]
 
-    # --- 結果の整形 (共通処理) ---
+    # ... (結果の整形処理は既存と同じなので省略せず書くなら以下) ...
     result = []
     for item in sorted_items_list:
         seller_name = "不明"
@@ -469,7 +523,6 @@ def get_items(sort: str = "recommend", db: Session = Depends(get_db)):
         if item.channel and item.channel.owner:
             seller_name = item.channel.owner.username
             seller_id = item.channel.owner.id
-        
         jp_category_name = CATEGORY_TRANSLATION.get(item.category_code, item.category_code)
         
         result.append({
@@ -484,7 +537,6 @@ def get_items(sort: str = "recommend", db: Session = Depends(get_db)):
             "seller_id": seller_id,
             "seller_name": seller_name
         })
-    
     return result
 
 
