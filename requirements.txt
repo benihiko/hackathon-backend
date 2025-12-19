@@ -5,3 +5,8 @@ mysql-connector-python
 python-multipart
 google-generativeai
 python-dotenv
+passlib[bcrypt]
+bcrypt==3.2.0
+joblib
+scikit-learn
+pandas
