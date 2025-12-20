@@ -2,7 +2,7 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey, DateTime, func
 from sqlalchemy.dialects.mysql import LONGTEXT 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
@@ -184,6 +184,17 @@ class ItemCreate(BaseModel):
     user_id: int
     channel_id: int # ★修正: ユーザーが選択したチャンネルIDを必須にする
 
+# --- Viewモデル (閲覧履歴) ---
+class View(Base):
+    __tablename__ = "views"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    item_id = Column(Integer, ForeignKey("items.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+# 最後にこれを忘れずに（テーブルが自動作成されます）
+Base.metadata.create_all(bind=engine)
+
 # --- アプリ ---
 app = FastAPI()
 #origins = [
@@ -332,6 +343,14 @@ def toggle_like(item_id: int, req: PurchaseRequest, db: Session = Depends(get_db
         db.add(new_like)
         db.commit()
         return {"liked": True}
+    
+@app.post("/api/items/{item_id}/view")
+def record_view(item_id: int, req: PurchaseRequest, db: Session = Depends(get_db)):
+    # 閲覧履歴を保存（何度見ても履歴は残す）
+    new_view = View(user_id=req.user_id, item_id=item_id)
+    db.add(new_view)
+    db.commit()
+    return {"status": "ok"}
 
 # ★追加: いいね一覧取得API
 @app.get("/api/users/{user_id}/likes")
@@ -491,11 +510,22 @@ def get_items(sort: str = "recommend", user_id: Optional[int] = None, db: Sessio
         else:
             DEMO_USER_ID = 555696053 
             
-            # ★追加: ユーザーがいいねしているカテゴリを取得して「ブースト」する
+            # --- スコア加算処理 ---
             liked_categories = []
+            view_counts = {} # ★閲覧回数用
+            
             if user_id:
+                # 1. いいねしたカテゴリ取得 (+5.0点用)
                 liked_items = db.query(Item).join(Like).filter(Like.user_id == user_id).all()
                 liked_categories = [i.category_code for i in liked_items if i.category_code]
+                
+                # 2. ★追加: カテゴリごとの閲覧回数を集計
+                # ユーザーがそのカテゴリの商品を何回見たか
+                views = db.query(Item.category_code, func.count(View.id)) \
+                        .join(View, Item.id == View.item_id) \
+                        .filter(View.user_id == user_id) \
+                        .group_by(Item.category_code).all()
+                view_counts = {cat: count for cat, count in views}
 
             scored_items = []
             for item in items:
@@ -504,9 +534,14 @@ def get_items(sort: str = "recommend", user_id: Optional[int] = None, db: Sessio
                     match = rec_prefs[(rec_prefs['user_id'] == DEMO_USER_ID) & (rec_prefs['category_code'] == item.category_code)]
                     if not match.empty: user_cat_score = match.iloc[0]['score']
                 
-                # ★追加: もしこの商品のカテゴリをいいねしていたら、スコアに +5.0点 (かなり強力)
+                # スコア加算: いいね (+5.0)
                 if item.category_code in liked_categories:
                     user_cat_score += 5.0
+                
+                # ★追加: 閲覧回数 (+0.5/回、最大3.0点まで)
+                # 1回見るごとに0.5点アップ、ただしスパム防止で上限を設けるのが一般的
+                v_count = view_counts.get(item.category_code, 0)
+                user_cat_score += min(v_count * 0.5, 3.0) 
 
                 try:
                     prob = rec_model.predict_proba(pd.DataFrame([[user_cat_score]], columns=['score']))[0][1]
