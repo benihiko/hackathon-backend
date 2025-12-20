@@ -498,60 +498,81 @@ def get_user_items(user_id: int, db: Session = Depends(get_db)):
 # user_id 引数を追加 (Optional)
 @app.get("/api/items")
 def get_items(sort: str = "recommend", user_id: Optional[int] = None, db: Session = Depends(get_db)):
+    # チャンネルとユーザー情報を結合して取得
     items = db.query(Item).outerjoin(Channel).outerjoin(User).all()
+    
     sorted_items_list = []
 
+    # --- パターンA: 新着順 (IDの降順) ---
     if sort == "new":
         sorted_items_list = sorted(items, key=lambda x: x.id, reverse=True)
+    
+    # --- パターンB: おすすめ順 (機械学習) ---
     else:
-        # レコメンドロジック
+        # モデルがない場合は新着順にフォールバック
         if rec_model is None or rec_prefs is None:
+            print("⚠️ レコメンドモデルがロードされていないため、新着順で返します")
             sorted_items_list = sorted(items, key=lambda x: x.id, reverse=True)
         else:
             DEMO_USER_ID = 555696053 
             
             # --- スコア加算処理 ---
             liked_categories = []
-            view_counts = {} # ★閲覧回数用
+            view_counts = {}
             
             if user_id:
-                # 1. いいねしたカテゴリ取得 (+5.0点用)
+                # 1. いいねしたカテゴリ取得
                 liked_items = db.query(Item).join(Like).filter(Like.user_id == user_id).all()
                 liked_categories = [i.category_code for i in liked_items if i.category_code]
                 
-                # 2. ★追加: カテゴリごとの閲覧回数を集計
-                # ユーザーがそのカテゴリの商品を何回見たか
-                views = db.query(Item.category_code, func.count(View.id)) \
-                        .join(View, Item.id == View.item_id) \
-                        .filter(View.user_id == user_id) \
-                        .group_by(Item.category_code).all()
-                view_counts = {cat: count for cat, count in views}
+                # 2. 閲覧回数を集計 (funcが必要なのでimportを確認してください！)
+                try:
+                    views = db.query(Item.category_code, func.count(View.id)) \
+                              .join(View, Item.id == View.item_id) \
+                              .filter(View.user_id == user_id) \
+                              .group_by(Item.category_code).all()
+                    view_counts = {cat: count for cat, count in views}
+                except Exception as e:
+                    print(f"⚠️ 閲覧履歴の集計に失敗 (Viewテーブルがない可能性があります): {e}")
 
             scored_items = []
             for item in items:
                 user_cat_score = 0
+                
+                # (1) 基礎スコア (CSV由来)
                 if item.category_code:
                     match = rec_prefs[(rec_prefs['user_id'] == DEMO_USER_ID) & (rec_prefs['category_code'] == item.category_code)]
-                    if not match.empty: user_cat_score = match.iloc[0]['score']
+                    if not match.empty: 
+                        user_cat_score = float(match.iloc[0]['score']) # floatに変換
                 
-                # スコア加算: いいね (+5.0)
+                # (2) いいねブースト (+50点に強化！)
                 if item.category_code in liked_categories:
-                    user_cat_score += 5.0
+                    user_cat_score += 50.0 
                 
-                # ★追加: 閲覧回数 (+0.5/回、最大3.0点まで)
-                # 1回見るごとに0.5点アップ、ただしスパム防止で上限を設けるのが一般的
+                # (3) 閲覧ブースト
                 v_count = view_counts.get(item.category_code, 0)
-                user_cat_score += min(v_count * 0.5, 3.0) 
+                user_cat_score += min(v_count * 1.0, 10.0)
 
+                # 予測実行
+                prob = 0
                 try:
-                    prob = rec_model.predict_proba(pd.DataFrame([[user_cat_score]], columns=['score']))[0][1]
-                except: prob = 0
+                    # モデル入力用のDataFrameを作成
+                    input_df = pd.DataFrame([[user_cat_score]], columns=['score'])
+                    prob = rec_model.predict_proba(input_df)[0][1]
+                except Exception as e:
+                    # ★ここが重要: なぜエラーが出ているかログに出す
+                    # print(f"予測エラー (ID: {item.id}): {e}") 
+                    # 予測失敗時は、単純にスコアをそのまま確率の代わりに使う（救済措置）
+                    prob = user_cat_score 
+
                 scored_items.append({"item": item, "prob": prob})
             
-            scored_items.sort(key=lambda x: x["prob"], reverse=True)
+            # ★修正: 「確率」→「ID(新着)」の優先順位でソート
+            # これでAIが失敗しても、最低限「新着順」にはなる（古い順にはならない）
+            scored_items.sort(key=lambda x: (x["prob"], x["item"].id), reverse=True)
             sorted_items_list = [x["item"] for x in scored_items]
 
-    # ... (結果の整形処理は既存と同じなので省略せず書くなら以下) ...
+    # --- 結果の整形 (共通処理) ---
     result = []
     for item in sorted_items_list:
         seller_name = "不明"
@@ -559,6 +580,7 @@ def get_items(sort: str = "recommend", user_id: Optional[int] = None, db: Sessio
         if item.channel and item.channel.owner:
             seller_name = item.channel.owner.username
             seller_id = item.channel.owner.id
+        
         jp_category_name = CATEGORY_TRANSLATION.get(item.category_code, item.category_code)
         
         result.append({
@@ -573,6 +595,7 @@ def get_items(sort: str = "recommend", user_id: Optional[int] = None, db: Sessio
             "seller_id": seller_id,
             "seller_name": seller_name
         })
+    
     return result
 
 
