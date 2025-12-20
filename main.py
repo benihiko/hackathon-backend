@@ -39,6 +39,7 @@ CATEGORY_TRANSLATION = {
     "computers.notebook": "ノートPC",
     "computers.peripherals.monitor": "モニター",
     "electronics.audio.headphone": "ヘッドフォン",
+    "electronics.audio.earphone": "イヤホン",
     "electronics.camera.photo": "カメラ",
     "electronics.smartphone": "スマートフォン",
     "electronics.tablet": "タブレット",
