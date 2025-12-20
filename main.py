@@ -525,7 +525,6 @@ def get_following_channels(user_id: int, db: Session = Depends(get_db)):
     follows = db.query(ChannelFollow).filter(ChannelFollow.user_id == user_id).all()
     return [f.channel_id for f in follows]
 
-# ★修正: get_items (フォロー中フィルタと、チャンネル情報の返却を追加)
 @app.get("/api/items")
 def get_items(sort: str = "recommend", user_id: Optional[int] = None, db: Session = Depends(get_db)):
     # チャンネルとユーザー情報を結合して取得
@@ -533,44 +532,86 @@ def get_items(sort: str = "recommend", user_id: Optional[int] = None, db: Sessio
     
     sorted_items_list = []
 
-    # --- パターンC: フォロー中のみ (★新規追加) ---
+    # --- パターンC: フォロー中のみ ---
     if sort == "following":
         if not user_id:
-            return [] # ログインしてなければ空
-        
-        # 自分がフォローしているチャンネルIDを取得
+            return []
         followed_channel_ids = db.query(ChannelFollow.channel_id).filter(ChannelFollow.user_id == user_id).all()
         target_ids = [f[0] for f in followed_channel_ids]
-        
-        # そのチャンネルの商品だけを抽出
         filtered_items = [i for i in items if i.channel_id in target_ids]
-        # 新しい順にソート
         sorted_items_list = sorted(filtered_items, key=lambda x: x.id, reverse=True)
 
     # --- パターンA: 新着順 ---
     elif sort == "new":
         sorted_items_list = sorted(items, key=lambda x: x.id, reverse=True)
     
-    # --- パターンB: おすすめ順 ---
+    # --- パターンB: おすすめ順 (機械学習) ---
     else:
-        # ... (既存のレコメンドロジックそのまま) ...
-        # (中略: rec_modelの処理など、前回のコードを維持してください)
-        
-        # 万が一エラーなどでリストが空の場合の救済
-        if not sorted_items_list and not sort == "following": 
-             sorted_items_list = sorted(items, key=lambda x: x.id, reverse=True)
+        if rec_model is None or rec_prefs is None:
+            # モデルがない場合は新着順にフォールバック
+            sorted_items_list = sorted(items, key=lambda x: x.id, reverse=True)
+        else:
+            DEMO_USER_ID = 555696053 
+            
+            # --- 行動ログ（いいね・閲覧）の集計 ---
+            liked_categories = []
+            view_counts = {}
+            if user_id:
+                # いいね
+                liked_items = db.query(Item).join(Like).filter(Like.user_id == user_id).all()
+                liked_categories = [i.category_code for i in liked_items if i.category_code]
+                # 閲覧
+                try:
+                    views = db.query(Item.category_code, func.count(View.id)) \
+                            .join(View, Item.id == View.item_id) \
+                            .filter(View.user_id == user_id) \
+                            .group_by(Item.category_code).all()
+                    view_counts = {cat: count for cat, count in views}
+                except:
+                    pass
 
-    # --- 結果の整形 (★修正: channel_id, channel_name を追加) ---
+            scored_items = []
+            for item in items:
+                # 基礎スコア (pkl由来)
+                user_cat_score = 0
+                if item.category_code:
+                    match = rec_prefs[(rec_prefs['user_id'] == DEMO_USER_ID) & (rec_prefs['category_code'] == item.category_code)]
+                    if not match.empty: 
+                        user_cat_score = float(match.iloc[0]['score'])
+                
+                # 行動ブースト (ここでリアルタイム性を出す)
+                if item.category_code in liked_categories:
+                    user_cat_score += 50.0 # いいねは強力
+                
+                v_count = view_counts.get(item.category_code, 0)
+                user_cat_score += min(v_count * 1.0, 10.0) # 閲覧は回数に応じて
+
+                # 確率計算
+                try:
+                    input_df = pd.DataFrame([[user_cat_score]], columns=['score'])
+                    # ロジスティック回帰モデルで確率を算出
+                    prob = float(rec_model.predict_proba(input_df)[0][1])
+                except:
+                    # モデルがエラーを吐いた場合はスコアをそのまま順位付けに使う
+                    prob = float(user_cat_score)
+
+                scored_items.append({"item": item, "prob": prob})
+            
+            # 【重要】ソート順: 確率(prob)の降順。確率が全く同じ場合のみ新着順。
+            scored_items.sort(key=lambda x: (x["prob"], x["item"].id), reverse=True)
+            sorted_items_list = [x["item"] for x in scored_items]
+
+    # --- 結果の整形 ---
     result = []
     for item in sorted_items_list:
         seller_name = "不明"
         seller_id = -1
-        channel_name = "未設定チャンネル" # ★追加
-        channel_id = -1 # ★追加
+        channel_name = "未設定チャンネル"
+        channel_id = -1
 
         if item.channel:
-            channel_name = item.channel.name # ★追加
-            channel_id = item.channel.id # ★追加
+            channel_name = item.channel.name
+            channel_id = item.channel.id
             if item.channel.owner:
                 seller_name = item.channel.owner.username
                 seller_id = item.channel.owner.id
@@ -588,8 +629,8 @@ def get_items(sort: str = "recommend", user_id: Optional[int] = None, db: Sessio
             "category_name": jp_category_name,
             "seller_id": seller_id,
             "seller_name": seller_name,
-            "channel_id": channel_id,     # ★ここ大事
-            "channel_name": channel_name  # ★ここ大事
+            "channel_id": channel_id,
+            "channel_name": channel_name
         })
     
     return result
